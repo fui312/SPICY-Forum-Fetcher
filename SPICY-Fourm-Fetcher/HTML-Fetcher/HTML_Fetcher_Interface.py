@@ -3,6 +3,7 @@ import urllib.request
 from re import findall, search
 import json
 from tkinter import *
+import os
 
 # Initalize variables we will be using
 keywords = "" # Keywords to whitelist/blacklist
@@ -18,6 +19,12 @@ pgcount = 0
 
 # Constant Variables
 char_set = 'UTF-8'
+
+# First time setup (this generally won't occur more than once)
+pwdDir = os.getcwd()
+if os.path.isdir(pwdDir + "/temp") == False:
+    os.mkdir("temp")
+    print("HTML dump directory doesn't exist! Making one for you.")
 
 # Function for creating Fetcher Configuration file
 def SaveConfig(k=keywords, a=activity, s=subfourm, f=frequency, m=maxposts, d=depth, w=whitelist):
@@ -36,7 +43,6 @@ def SaveConfig(k=keywords, a=activity, s=subfourm, f=frequency, m=maxposts, d=de
     with open('config.json', 'w') as newcfg:
         json.dump(config, newcfg) # This will place our config map in json format in file
     # The 'open' function also works to create files, hence its use here
-    del config
 
 # Check for config file, if it doesn't exist, create one
 try:
@@ -54,7 +60,6 @@ try:
         depth       = config['depth']
         # Debug: Dump json contents for debugging
         print(config)
-        del config
 except:
     print("Config file not found, creating one...")
     SaveConfig()
@@ -65,14 +70,18 @@ url = "http://boards.4chan.org/"
 # Function attempts to locate keywords in a given chunk of string
 # Returns true if it detects at least one, or false under the same conditions if 'inverse' is 'False'
 def CheckForKeywords(kw, chunk, inverse):
-    rtnVal = False
+    if inverse:
+        rtnVal = True
+    else:
+        rtnVal = False
     for i in range(len(kw)):
         testStr = findall(kw[i], chunk)
         if len(testStr) > 0:
+            print(testStr)
             if inverse:
-                rtnVal = True
-            else:
                 rtnVal = False
+            else:
+                rtnVal = True
             return rtnVal
     return rtnVal
 
@@ -92,17 +101,17 @@ def CheckForActivity(minCount, chunk):
             actualNumb = search('([0-9]+)', getNumb)
             ii = int(getNumb[actualNumb.start():actualNumb.end()])
             # Finally, compare the number
-            if minCount >= ii:
+            if ii >= minCount:
                 return True
     return False
 
 # Splices up board html into per-thread chunks, returning it in a map/json
 # The data from this function is what will eventually be sent to the C++ program
-def SortHtml():
+def SortHtml(kw, ac, sub, mx, dpt, wht):
     editingFile = 0
     foundThreads = 0
     # Clear keywordArray first before setting it
-    keywordArray = findall('(.*?);', keywords)
+    keywordArray = findall('(.*?);', kw)
     for i in range(len(keywordArray)):
         resStr = keywordArray[i].replace(';', '')
         keywordArray[i] = resStr
@@ -112,7 +121,7 @@ def SortHtml():
     filteredThrough = 0
     # Loop through all xhtml documents for threads, stopping if we run out, or fill our cap
     while True:
-        if foundThreads >= maxposts:
+        if foundThreads >= mx:
             break # Don't try to pull more threads once we reach our cap
         string = ""
         try:
@@ -140,23 +149,31 @@ def SortHtml():
                 valid['keywords'] = False
                 valid['activity'] = False
                 # Check to see if we're under our cap
-                if foundThreads >= maxposts:
+                if foundThreads >= mx:
+                    filteredThrough -= 1
                     break
                 # There's a hidden benifit to having these conditionals lined up this way:
                 # If the first statement returns true, the second one is never processed.
                 # This only works because the comparator is an 'or' statement
-                if len(keywordArray) == 0 or CheckForKeywords(keywordArray, d, whitelist):
+                if len(keywordArray) == 0 or CheckForKeywords(keywordArray, d, wht):
                     valid['keywords'] = True
-                if activity == -1 or CheckForActivity(activity, d):
+                if ac == -1 or CheckForActivity(ac, d):
                     valid['activity'] = True
                 # Passed all our checks, debug output
                 if valid['keywords'] == True and valid['activity'] == True:
                     filteredData.append(d)
-    del keywordArray
+                    foundThreads += 1
     if len(filteredData) > 0:
         print("Managed to filter down " + str(filteredThrough) + " threads to " + str(len(filteredData)) + "!")
-        for x in filteredData:
-            print("Filtered Thread No." + str(filteredData.index(x)) + ": \n" + x)
+        # Put data into a JSON file
+        _map = {}
+        _map['data'] = []
+        for i in filteredData:
+            _map['data'].append(i)
+        with open("filtered_threads.json", 'w') as saveFile:
+            json.dump(_map, saveFile)
+        #for x in filteredData:
+        #    print("Filtered Thread No." + str(filteredData.index(x)) + ": \n" + x)
 
 # Pulls the entire HTML from the board on a given page
 def PullHtml(page, cset = 'UTF-8'):
@@ -176,6 +193,7 @@ def PullHtml(page, cset = 'UTF-8'):
     with open('temp\html' + str(page) + '.xhtml', 'w', encoding=cset) as file:
         file.write("Pulled from: " + buildurl + "\n" + webstring)
 
+# Simple function that tracks how many pages the script has been told to go through
 def FetchThreads(d=1):
     i = 0
     print("Attempting to pull " + str(d) + " page/s...")
@@ -189,6 +207,8 @@ def FetchThreads(d=1):
 # Window
 cnf = {'bg': 'white', 'fg': 'black'}
 
+# This application class is soley for the UI present in this version of the script
+# If the script was to be automated, this entire section would not be here
 class Application(Frame):
     def __init__(self, master=None):
         Frame.__init__(self, master)
@@ -211,7 +231,6 @@ class Application(Frame):
         # Create the window UI
         self.createWidgets()
     def createWidgets(self):
-
         # Word Filter Box
         self.filterLabel = Label(self, text="Filter Words:")
         self.filterLabel.grid(row=0, sticky=W, padx=(10, 10))
@@ -274,12 +293,14 @@ class Application(Frame):
         print("Max Posts to Search: " + str(maxposts))
         depth    = self.depthInt.get()
         print("Search Depth: " + str(depth))
-        SaveConfig(keywords, activity, subfourm, maxposts, depth, whitelist)
+        SaveConfig(keywords, activity, subfourm, 60, maxposts, depth, whitelist)
 
-        # Fetch raw HTML
-        #FetchThreads(depth)
-        SortHtml()
+        # Fetch raw HTML and save it
+        FetchThreads(depth)
+        SortHtml(keywords, activity, subfourm, maxposts, depth, whitelist)
 
-app = Application() # Instantiate the application class
+root = Tk()
+root.resizable(False, False)
+app = Application(root) # Instantiate the application class
 app.master.title("HTML Fetcher")
 app.mainloop() # Wait for events
